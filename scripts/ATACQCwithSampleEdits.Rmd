@@ -1,0 +1,481 @@
+---
+title: "QC for PV_SST Samples"
+output: html_notebook
+---
+
+```{r, echo = FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = "", tidy = T, warning = F, fig.height = 7, fig.width = 12 , message = F)
+##-Loading in packages 
+library(knitr)
+library(Rsubread)
+library(readxl)
+library(pheatmap)
+library(corrplot)
+library(readr)
+library(foreach)
+library(tidyverse)
+library(kableExtra)
+library(plotly)
+library(ggiraph)
+
+#library(rgl)
+source('/media/west-lab-share/Melyssa_Minto/PV_SST/Scripts/BamStats.R')
+
+linux_path<-"/media/west-lab-share/Melyssa_Minto/PV_SST/"
+
+path<-linux_path
+#knit_hooks$set(webgl = hook_webgl)
+#setwd(paste0(path, "/PeakCenter"))
+
+##-Loading in data
+path<-linux_path
+
+```
+
+```{r, echo = F, include=F}
+#-Read in sample meta data
+Samples <-read_excel("/media/west-lab-share/Melyssa_Minto/PV_SST/PeakCenter/center_treated/PV_SST_SamplesATACPVplusPVsens.xlsx")
+Samples = Samples[Samples$Assay %in% "ATAC",]
+#Samples = Samples[(Samples$Treatment %in% "None"),]
+Samples = Samples[Samples$Type %in% ("PV"), ]
+Samples = Samples[Samples$Animal %in% "Y", ]
+Samples = Samples[Samples$Timepoint %in% "168", ]
+#Samples = Samples[Samples$ID %in% c("10","6","3","2","8","17","15","14", "11", "5", "9", "13", "18", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30", "31", "32", "33", "34", "35"),]
+#Read in fastq QC
+
+fastqQC<-foreach( i = 1:nrow(Samples), .combine = 'rbind')%do%
+  {
+    folder <- list.files(Samples$PathToFolder[i],pattern = "_fastqc", full.names = TRUE)[1]
+    print(folder)
+
+
+    file<-paste0(folder, "/summary.txt")
+    t = read_delim(file, "\t", escape_double = FALSE, col_names = FALSE,  trim_ws = TRUE)
+    t$X1
+  }
+colnames(fastqQC)<-c("BasicStats", "BaseSeqQC", "TileSeqQC", "SeqQC", "BaseSeqC", "SeqGCC","BaseNC", "SeqLenDist", "DupLev", "OverrepSeq" , "AdaptC", "KmerC")
+
+
+#-Read in Data 
+merged <- read_tsv(paste0(path, "Data/bedtoolsMergedPeaks/all_PVSensN_final3_filt.bed"), col_names = FALSE)
+mm10_chrom_sizes <- read_delim("/media/west-lab-share/genomeData/mm10/mm10.chrom.sizes.txt", "\t", escape_double = FALSE, col_names = FALSE, trim_ws = TRUE)
+
+#making a 200bp window from the center of each peak
+merged$center<- round(((merged$X2 + merged$X3)/2))
+merged$left<- merged$center-100
+merged$right <- merged$center+100
+
+for( i in 1:nrow(merged)){
+   if(merged$right[i] > mm10_chrom_sizes$X2[which(merged$X1[i] == mm10_chrom_sizes$X1)]){
+     merged$right[i] <- mm10_chrom_sizes$X2[which(merged$X1[i] == mm10_chrom_sizes$X1)]
+     cat("changed: ", i)
+   }
+  
+  if(merged$right[i] < 0){
+     merged$right[i] <-0
+     cat("changed: ", i)
+  }
+  
+   if(merged$left[i] > mm10_chrom_sizes$X2[which(merged$X1[i] == mm10_chrom_sizes$X1)]){
+     merged$left[i] <- mm10_chrom_sizes$X2[which(merged$X1[i] == mm10_chrom_sizes$X1)]
+     cat("changed: ", i)
+   }
+  
+  if(merged$left[i] < 0){
+     merged$left[i] <-0
+     cat("changed: ", i)
+  }
+  
+}
+# changed:  406227
+
+
+bed <- merged[,c(1,5,6)]
+bed$left<-format(bed$left, scientific=F)
+bed$right<-format(bed$right, scientific=F)
+options(scipen=10)
+write_tsv(bed, "/media/west-lab-share/Melyssa_Minto/PV_SST/Data/bedtoolsMergedPeaks/all_PVSensN_final3_filtx.bed", col_names = FALSE)
+options(scipen=0)
+
+#-creating a feature file for all all the peaks in each sample
+peakFeature.file<-unique(data.frame(GeneID=paste("peak", rownames(merged), sep ="_"),
+                         Chr=merged$X1 ,
+                         Start=merged$left, 
+                         End =merged$right , 
+                         Strand = rep("", nrow(merged)),
+                         stringsAsFactors = F))
+
+```
+
+# Background
+Recent work has shown that silencing PV+ interneurons of the Nucleus Accumbens (NAc) blocks the development of locomotor sensitization induced by repeated doses of amphetamine (AMPH) revealing a specific and previously unknown role for these interneurons in behavioral adaptations to drugs of abuse.
+
+# Biological Question
+How does the chromatin landscape of  Parvalbumin(PV) interneurons change with drug-stimulii?
+
+# Data Collection
+A novel method, Isolation of Nuclei Tagged in Specific Cell Types (INTACT), was used to purify PV  interneurons in the Nucleus Accumbesn (NAC) in mice brain. Then ATACseq was used to assay transcriptional and epigenetic modifications of the different cell types. We have ATACseq data from saline-treated (SAL), and amphetamine-treated(AMPH) cells delivered via intraperitoneal injection. *note= all of the saline treated and amphetamine treated were exteacted from the NAC but is not denoted in its sample name*
+
+```{r, echo =FALSE}
+Samples[, c("samples","Type","IPvUF", "Timepoint", "Treatment", "Region", "Replicate", "GoodData", "Lane", "ID", "Animal", "SequenceDate", "Sex")]
+```
+
+**Dictionary of Acronyms**
+
++ IP = pull down 
+
++ UF = unbound fraction
+
++ PV = Parvalbumin interneurons
+
++ SAL = saline treated
+
++ AMPH = amphetamine treated 
+
++ NAC = Nuclues accumbens 
+
++ MF = Male-Female pair
+
++ F = Female single animal
+
++ M = Male single animal
+
+
+# Data analysis
+Peaks from the PV and SST interneurons were called using MACS2 and merged using bedtools. There are **`r nrow(merged)`** peaks in the this union set.
+```{r,echo =FALSE}
+#Merged Peaks
+head(merged[,1:3])
+```
+
+Each peak was reduced to a 200bp window around the center of each peak. These regions were then used to get the peak counts for each sample.
+```{r, echo=FALSE}
+#Peak Feature File
+head(peakFeature.file[,1:4])
+```
+
+Then the counts from the peak regions will be calculated using `Rsubread::featureCounts`. This resulted in a count matrix of all replicates. 
+
+```{r, echo =FALSE}
+#Getting the counts for all samples 
+PeakCountList<-featureCounts(files = paste0(Samples$PathToFolder, Samples$bam),
+              annot.ext = peakFeature.file,
+              nthreads = 8,
+              annot.inbuilt = "mm10",
+              isPairedEnd = TRUE)
+save.image("/media/west-lab-share/Melyssa_Minto/PV_SST/PeakCenter/center_treated/Counts_allPVsensATACnewmerge.RData")
+
+#GeneCountList<-featureCounts(files =  paste0(Samples$PathToFolder, Samples$bam),
+              #annot.inbuilt = "mm10",
+              #isPairedEnd = TRUE)
+
+#save.image("/media/west-lab-share/Melyssa_Minto/PV_SST/PeakCenter/center_treated/Counts_allPV60minatac.RData")
+```
+
+
+```{r, echo = FALSE}
+QC <- data.frame()
+
+for(i in 1:nrow(Samples)){
+  cat('Getting stats for ' )
+  cat(paste0(Samples$PathToFolder, Samples$bam)[i])
+  cat("\n")
+  new<- stats(paste0(Samples$PathToFolder, Samples$bam)[i], PeakCountList$counts[,i])
+  QC <-rbind(QC, new)
+  print(QC)
+  save.image("/media/west-lab-share/Melyssa_Minto/PV_SST/PeakCenter/center_treated/Counts_QC_PVSensenewmergeallATAC.RData")
+}
+
+
+```
+
+
+# Sample metadata
+
+```{r, echo = FALSE}
+Samples_QC <- cbind(Samples[,c("samples","Type","IPvUF", "Treatment", "Region", "ATACDate", "GoodData", "ID", "Animal", "LibraryPrepDate", "SequenceDate", "Sex", "NumReads", "Replicate", "aligner", "performedLibraryPrep", "performedAlignment")], QC)
+ ""
+Samples_QC$samples_rep = factor(paste0(Samples_QC$samples, Samples_QC$ID))
+# Reformatting Sample Meta data 
+Samples_QC$Type<-factor(Samples_QC$Type)
+Samples_QC$Replicate<-factor(Samples_QC$Replicate)
+Samples_QC$Treatment<-factor(Samples_QC$Treatment)
+Samples_QC$samples<-factor(Samples_QC$samples, levels = unique(Samples$samples))
+Samples_QC$IPvUF<-factor(Samples_QC$IPvUF)
+Samples_QC$Sex<-factor(Samples_QC$Sex)
+Samples_QC$rawReads<-as.numeric(as.character(Samples_QC$rawReads))
+Samples_QC$mappedReads<-as.numeric(as.character(Samples_QC$mappedReads))
+Samples_QC$unmappedReads<-as.numeric(as.character(Samples_QC$unmappedReads))
+Samples_QC$basesMapped<-as.numeric(as.character(Samples_QC$basesMapped))
+Samples_QC$mismatches<-as.numeric(as.character(Samples_QC$mismatches))
+Samples_QC$errorRate<-as.numeric(as.character(Samples_QC$errorRate))
+Samples_QC$gcc <- as.numeric(Samples_QC$gcc)
+Samples_QC$frip <- as.numeric(Samples_QC$frip)
+Samples_QC$pbc <- as.numeric(Samples_QC$pbc)
+
+#Adding Fraction of reads in genes
+Samples_QC$frig <- colSums(GeneCountList$counts[,1:6])/Samples_QC$rawReads 
+#adding fastq QC values
+Samples_QC <- cbind(Samples_QC, fastqQC[1:15,])
+rownames(Samples_QC)<-c(1:nrow(Samples_QC))
+
+#Output sample sheet
+write_csv(Samples_QC, "/media/west-lab-share/Melyssa_Minto/PV_SST/PeakCenter/center_treated/SampleSheetsst_QC_05sens1821.csv")
+Samples_QC_plot <- cbind(Samples_QC, Samples[,c("html", "Lane")])
+```
+
+
+```{r, echo = FALSE}
+#These are the descriptions of all of the cariables in the metadata
+description = c("Names of samples", "PV or SST interneuron","IP - pulldown or UF - unbound fraction", "no treatement, saline-treated, or amphetamine-treated", "Brain region sample is extracted from", "Date that the ATAC step was done", "Date of library prep", "date of sequencing", "the sex pairing of the sample", "Number of reads from the sequencer", "replicate number", "the software used to align the samples", "who performed library prep", "who did the alignment", "raw reads from bam file", "reads that are mapped", "rawReads - mappedReads", "total aligned bases", "sum of mismatches between a sequence read and a reference genome after alignment", "mismatches/basesMapped", "fraction of reads in peaks", "GC Content", "PCR bottleneck coeffient", "fraction of reads in genes","FASTQC Basic statistics", "FASTQ base sequence quality", "FASTQ Tile sequence quality", "FASTQ Sequence Quality Score", "FASTQ Base Seqeunce Content", "FASTQ Sequence GC Content", "FASTQ Base N Content", "FASTQ Sequence Lenght Distribution", "FASTQ Sequence duplication levels", "FASTQ Overrepesented sequences", "FASTQ Adapter content")
+
+#Formatting table - breaking up in to two colums
+#column1 
+variables1 = colnames(Samples_QC)[1:18]
+desc1 = description[1:18]
+
+#clumn2
+variables2 = colnames(Samples_QC)[19:36]
+desc2 = description[19:36]
+
+
+text_tbl <- data.frame(variables1, desc1, variables2, desc2)
+
+x = kable(text_tbl) %>%
+ kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive"))  %>%
+  column_spec(1, bold = T, border_right = T, border_left = T) %>%
+  column_spec(2, width = "70em")%>%
+  column_spec(3, bold = T, border_right = T, border_left = T) %>%
+  column_spec(4, width = "70em")
+gsub("<thead>.*</thead>", "", x)
+
+Samples_QC
+```
+
+
+# GC Content:
+```{r, echo=FALSE}
+g<- Samples_QC_plot %>%
+  filter(rawReads != 0) %>%
+  ggplot(aes(y=gcc, x=samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  ylim(35, 65)+
+  geom_hline(yintercept  = c(50),color=c('springgreen4'),linetype="dashed" )+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  ylab("gcc(%)")+
+  guides(color = FALSE)
+girafe(code = print(g) )
+
+```
+# Fraction of Reads in Peaks:
+According to [ENCODE ATACseq guidelines](https://www.encodeproject.org/atac-seq/), FRiP values should be greater 0.3, but values greater than 0.2 are acceptable.
+```{r, echo=FALSE}
+g<-Samples_QC_plot %>%
+  ggplot(aes(y=frip, x = samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  geom_hline(yintercept  = c(.2, .3),color=c('darkgoldenrod1','springgreen4'),linetype="dashed" )+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+
+girafe(code = print(g) )
+```
+# Mapped Reads:
+```{r, echo = FALSE}
+g<-Samples_QC_plot %>%
+  ggplot(aes(y=mappedReads,x=samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+girafe(code = print(g) )
+
+```
+
+# Raw Reads:
+```{r, echo = FALSE}
+g<-Samples_QC %>%
+  ggplot(aes(y=rawReads,x=samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))
+
+girafe(code = print(g) )
+
+```
+# Unmapped Reads:
+```{r, echo = FALSE}
+g <-Samples_QC %>%
+  ggplot(aes(y=unmappedReads, x=samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+girafe(code = print(g) )
+
+```
+# Bases Mapped: 
+```{r, echo = FALSE}
+g<-Samples_QC %>%
+  ggplot(aes(y=basesMapped, x=samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+girafe(code = print(g) )
+
+```
+# Mismatches:
+```{r, echo = FALSE}
+g<-Samples_QC %>%
+  ggplot(aes(y=mismatches,x=samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+
+girafe(code = print(g) )
+
+```
+# Error Rate:
+The error rate is sum of mismatches and divided by the number of bases aligned.
+
+```{r, echo = FALSE}
+g<-Samples_QC %>%
+  ggplot(aes(y=errorRate, x=samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+
+girafe(code = print(g) )
+
+```
+
+#PCR Bottleneck effect:
+
+PBC is the number of genomic locations to which has one unique mapped read divded by the number of non-redundant, uniquely mapped reads.The [ENCODE ATACseq guidelines](https://www.encodeproject.org/atac-seq/) suggest that this value should be greater than 0.9.
+
++ 0-0.5 is severe bottlenecking
+
++ 0.5-0.8 is moderate bottlenecking
+
++ 0.8-0.9 is mild bottlenecking
+
++ 0.9-1.0 is no bottlenecking
+
+```{r, echo = FALSE}
+g<-Samples_QC %>%
+  ggplot(aes(y=pbc, x=samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  geom_hline(yintercept  = c(.5,.8, .9),color=c('red','darkgoldenrod1','springgreen4'),linetype="dashed" )+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+
+girafe(code = print(g) )
+
+```
+
+#Fraction of Reads in Genes:
+
+```{r, echo = FALSE}
+g<-Samples_QC %>%
+  ggplot(aes(y=frig, x=samples))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+girafe(code = print(g) )
+
+
+```
+
+```{r, echo = FALSE}
+g<-Samples_QC %>%
+  ggplot(aes(y=basesMapped, x=Replicate))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))
+  #guides(color = FALSE)
+girafe(code = print(g) )
+
+
+```
+```{r, echo = FALSE}
+g<-Samples_QC %>%
+  ggplot(aes(y=Animal, x=gcc))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+girafe(code = print(g) )
+
+
+```
+```{r, echo = FALSE}
+g<-Samples_QC %>%
+  ggplot(aes(y=mappedReads, x=Animal))+
+  geom_point_interactive( aes(tooltip = samples_rep, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))
+  #guides(color = FALSE)
+girafe(code = print(g) )
+
+
+```
+
+# Correlation of QC Metrics
+```{r, echo = FALSE, fig.height=10, fig.width=10}
+temp<-Samples_QC[,c(colnames(QC), "frig")]
+temp$Lane = Samples$Lane
+
+corrr <- cor(data.matrix(temp))
+corrplot.mixed(corrr,tl.pos = "lt")
+```
+
+
+```{r, echo = FALSE, include=FALSE}
+g<-Samples_QC_plot %>%
+  ggplot(aes(y=mismatches,  x=Lane))+
+  geom_point_interactive( aes(tooltip = samples_rep,shape=Sex, color = samples), size=4)+  
+  scale_fill_manual(values= unique(Samples_QC_plot$html))+
+  facet_grid(~SequenceDate)+
+  theme(panel.background = element_blank(), axis.text.x = element_text(angle=45, hjust = 1.1))+
+  guides(color = FALSE)
+#girafe(code = print(g) )
+
+
+```
+
+
+
+# Taking a look at fastQ 
+
++ Green = Passes
+
++ Orange = Wanring 
+
++ Red = falied
+
+```{r,echo=FALSE}
+#Samples_QC_plot <- Samples_QC_plot[-39,]
+dat<-fastqQC[1:16, ]
+#fail = 1, warn = 2, pass = 3
+dat[dat == "FAIL"] <- 1
+dat[dat == "WARN"] <- 2
+dat[dat == "PASS"] <- 3
+dat <- apply(dat,2,as.numeric)
+
+rownames(dat)<-paste0(Samples_QC_plot$samples, Samples_QC_plot$Replicate)
+
+pheatmap(t(dat),
+         cluster_cols = FALSE,
+         cluster_rows = FALSE, 
+         breaks = c(0,1,2,3),
+         color = c("red", "orange", "green"),
+         legend = FALSE)
+```
+
+```{r}
+  save.image(paste0("/media/west-lab-share/Melyssa_Minto/PV_SST/PeakCenter/center_treated/Counts_PVsensrechcek1add3329fast",format(Sys.Date(), "%m%d%y"),".RData"))
+```

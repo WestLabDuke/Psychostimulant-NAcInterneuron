@@ -1,0 +1,591 @@
+---
+title: "PV Seurat ressurection"
+output: html_notebook
+---
+
+```{r}
+BiocManager::install("multtest")
+```
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+
+
+linux_path<-"/media/west-lab-share/David_Gallegos/10X"
+system(paste0("mkdir ", linux_path,"/Output_",format(Sys.time(), "PV10xFullSet_%m%d%Y") ))
+
+```
+
+# Loading .Rdata file with already processed R objects following Seurat vignette https://satijalab.org/seurat/v3.1/pbmc3k_tutorial.html
+# Can be found on Westlab server /data/westlab/10X
+
+```{r}
+#load("/media/west-lab-share/David_Gallegos/PV.analysis.full.RData")
+
+PVrawcount = Read10X(data.dir = '/media/west-lab-share/David_Gallegos/10X/filtered_feature_bc_matrix/')
+```
+
+
+```{r}
+load("/media/west-lab-share/David_Gallegos/PV.analysis.full.RData")
+```
+
+# Recreate PV.unfiltered from PV.data
+
+```{r}
+PV.unfiltered <- CreateSeuratObject(counts = PVrawcount, project = "PV", min.cells = 3, min.features = 200)
+PV.unfiltered
+head(PV.unfiltered@meta.data, 5)
+VlnPlot(PV.unfiltered, features = c("nFeature_RNA", "nCount_RNA"), ncol = 3)
+
+
+write.table(as.matrix(GetAssayData(object = PV.unfiltered, slot = "counts")), 
+            '/media/west-lab-share/David_Gallegos/10X/Output_PV10xFullSet_05172021/PVunfilteredcounts.csv', 
+            sep = ',', row.names = T, col.names = T, quote = F)
+
+
+```
+
+# PV.unfiltered genes x counts
+## Compared to final PV object I used from analysis - need to filter cells less than 650 UMI (no top end filter)
+
+```{r}
+unfiltered.count.plot <- FeatureScatter(PV.unfiltered, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+unfiltered.count.plot + geom_vline(xintercept = 500)
+```
+
+# Inspecting RNA counts and genes per cell in PV object post filtering
+
+```{r}
+plot.count <- FeatureScatter(PV.unfiltered, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot.count + geom_vline(xintercept = 650)
+
+# vertical line at 650 shows that cells < 650 UMI already filtered out, no top end filtering (possible doublets)
+# Robj PV.unfiltered has all
+```
+
+```{r}
+#Base filtering and normalization by min max features and lognormalize
+PVfirstfilt <- subset(PV.unfiltered, subset= nCount_RNA > 3000 & nCount_RNA < 15000)
+PVfirstfilt
+
+write.table(as.matrix(GetAssayData(object = PVfirstfilt, slot = "counts")), 
+            '/media/west-lab-share/David_Gallegos/10X/Output_PV10xFullSet_05172021/PVfirstfiltcounts.csv', 
+            sep = ',', row.names = T, col.names = T, quote = F)
+
+
+
+```
+
+
+
+
+
+# Calculating QC metrics that Anne requested 3/1/2020 - "After filtering out low quality cells w/ less than 650 UMI..."
+# mean genes per cell = 2450
+# mean UMI per cell = 5421
+## is there a way to get raw counts per cell? This would have to come from CellRanger since output is already UMI filtered
+
+```{r}
+Genes.per.cell.ls <- subset_PVfilt2[["nFeature_RNA"]]
+Genes.per.cell <- unlist(Genes.per.cell.ls)
+Genes.per.cell %>% typeof()
+mean(Genes.per.cell)
+```
+
+```{r}
+counts.per.cell.ls <- subset_PVfilt2[["nCount_RNA"]]
+counts.per.cell <- unlist(counts.per.cell.ls)
+counts.per.cell %>% typeof()
+mean(counts.per.cell)
+```
+
+```{r}
+#Subset based on PV expression
+subset_PVfilt2=subset(PVfirstfilt, subset=Pvalb>.5)
+subset_PVfilt2
+
+write.table(as.matrix(GetAssayData(object = subset_PVfilt2, slot = "counts")), 
+            '/media/west-lab-share/David_Gallegos/10X/Output_PV10xFullSet_05172021/Subset_PValvFilt2counts.csv', 
+            sep = ',', row.names = T, col.names = T, quote = F)
+
+
+subset_PVfilt2[["percent.mt"]] <- PercentageFeatureSet(subset_PVfilt2, pattern = "^mt-")
+FetchData(subset_PVfilt2, vars = "percent.mt") %>% colMeans()
+
+
+#Normalize Total Filtered data
+NormalizedPVfilt = NormalizeData(subset_PVfilt2)
+
+write.table(as.matrix(GetAssayData(object = NormalizedPVfilt, slot = "counts")), 
+            '/media/west-lab-share/David_Gallegos/10X/Output_PV10xFullSet_05172021/NormalizedPVfiltcounts.csv', 
+            sep = ',', row.names = T, col.names = T, quote = F)
+
+#Feature selection - Identify highly variable features
+IHV_PvalbSeurat=FindVariableFeatures(NormalizedPVfilt, selection.method = "vst", nfeatures = 2000)
+top10=head(VariableFeatures(IHV_PvalbSeurat), 10)
+top10
+
+top2k  <-  (VariableFeatures(IHV_PvalbSeurat))
+
+
+
+write.csv(as.data.frame(top2k),"/media/west-lab-share/David_Gallegos/10X/Output_PV10xFullSet_05172021/NormalizedPVfiltcounts.csv", append = FALSE)
+            
+
+```
+
+```{r}
+# plot variable features with and without labels
+plot1=VariableFeaturePlot(IHV_PvalbSeurat)
+plot2=LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+plot1
+plot2
+```
+
+
+```{r}
+#
+Idents(Scaled_PvalbSeurat, WhichCells(object = Scaled_PvalbSeurat, expression = Adarb2 > .1 & Pvalb > 0, slot = 'data')) <- 'pvfos.pos'
+Idents(Scaled_PvalbSeurat, WhichCells(object = Scaled_PvalbSeurat, expression = Adarb2 < .1 & Pvalb > 0, slot = 'data')) <- 'pvfos.neg'
+
+PVfosmarker <- FindMarkers(Scaled_PvalbSeurat, ident.1 = 'pvfos.pos', ident.2 = 'pvfos.neg')
+
+write.csv(as.data.frame(PVfosmarker), "/media/west-lab-share/David_Gallegos/10X/PVAdarplusminus01Scaled.csv", append = FALSE)
+
+Idents(IHV_PvalbSeurat) <- paste0(Idents(IHV_PvalbSeurat), IHV_PvalbSeurat$sample)
+
+
+#Scale the data prior to PCA
+all.genes=row.names(IHV_PvalbSeurat)
+Scaled_PvalbSeurat=ScaleData(IHV_PvalbSeurat,features=all.genes)
+
+write.table(as.matrix(GetAssayData(object = Scaled_PvalbSeurat, slot = "counts")), 
+            '/media/west-lab-share/David_Gallegos/10X/Output_PV10xFullSet_05172021/ScaledPvalbcounts.csv', 
+            sep = ',', row.names = T, col.names = T, quote = F)
+```
+
+```{r}
+#Run PCA and plot
+PCA_PvalbSeurat=RunPCA(Scaled_PvalbSeurat,features=VariableFeatures(object=Scaled_PvalbSeurat))
+
+DimHeatmap(PCA_PvalbSeurat, dims = 1, cells = 500, balanced = TRUE)
+
+PCA_PvalbSeurat=JackStraw(PCA_PvalbSeurat, num.replicate=100)
+PCA_PvalbSeurat=ScoreJackStraw(PCA_PvalbSeurat, dims=1:20)
+
+JackStrawPlot(PCA_PvalbSeurat,dims=1:20)
+
+ElbowPlot(PCA_PvalbSeurat)
+```
+
+
+```{r}
+#Make clusters of cells
+Neighbors_PvalbSeurat = FindNeighbors(PCA_PvalbSeurat, dims = 1:4)
+Clusters_PvalbSeurat = FindClusters(Neighbors_PvalbSeurat, resolution = 0.5)
+
+#UMap
+UMap_PvalbSeurat=RunUMAP(Clusters_PvalbSeurat, dims = 1:4)
+
+DimPlot(UMap_PvalbSeurat, reduction = "umap", label=TRUE)
+```
+
+```{r}
+#Characterizing clusters
+cluster0.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 0, min.pct = 0.25)
+head(cluster0.markers, n = 10)
+
+cluster1.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 1, min.pct = 0.25)
+head(cluster1.markers, n = 10)
+top100cluster1=rownames(head(cluster1.markers, n=100))
+write.csv(top100cluster1,"top100cluster1.csv")
+cluster2.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 2, min.pct = 0.25)
+head(cluster2.markers, n = 10)
+cluster3.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 3, min.pct = 0.25, only.pos=TRUE)
+head(cluster3.markers, n = 10)
+#top100cluster3=rownames(head(cluster3.markers, n=100))
+#write.csv(top100cluster3,"top30cluster3")
+cluster4.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 4, min.pct = 0.25, only.pos=TRUE)
+head(cluster4.markers, n = 10)
+cluster5.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 5, min.pct = 0.25)
+head(cluster5.markers, n = 10)
+top100cluster5=rownames(head(cluster5.markers, n=100))
+write.csv(top100cluster5,"top100cluster5.csv")
+cluster6.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 6, min.pct = 0.25)
+head(cluster6.markers, n = 10)
+cluster7.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 7, min.pct = 0.25)
+head(cluster7.markers, n = 50)
+cluster8.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 8, min.pct = 0.25)
+head(cluster8.markers, n = 10)
+cluster9.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 9, min.pct = 0.25)
+head(cluster9.markers, n = 10)
+cluster10.markers=FindMarkers(UMap_PvalbSeurat, ident.1 = 10, min.pct = 0.25)
+head(cluster10.markers, n = 10)
+
+#Get overlapping 
+overlapping3and4=Reduce(intersect,list(top100cluster3,top100cluster4))
+lists=c(cluster3.markers,cluster4.markers)
+write.csv(overlapping3and4,"overlappingcluster3and4")
+
+
+VlnPlot(UMap_PvalbSeurat, features = "Pvalb")
+VlnPlot(UMap_PvalbSeurat, features = "Pvalb", slot = "counts", log = TRUE)
+
+```
+
+```{r}
+VlnPlot(UMap_PvalbSeurat, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+
+VlnPlot(UMap_PvalbSeurat, features = c("Fos","Npas4", "Fosl2", "Nr4a3", "Junb"))
+VlnPlot(UMap_PvalbSeurat, features = c("Pvalb","Adarb2","Gpc5"))
+VlnPlot(UMap_PvalbSeurat, features = c("Pvalb","Sorcs1","Ntng1"))
+VlnPlot(UMap_PvalbSeurat, features = c("Etv1","Mef2c","Fosb"))
+VlnPlot(UMap_PvalbSeurat, features = c("Acan","Cntnap4","Bcan"))
+VlnPlot(UMap_PvalbSeurat, features = c("Pvalb","Sst","Ppp1r1b"))
+VlnPlot(UMap_PvalbSeurat, features = c("Pvalb","Gfap","Sox10"))
+VlnPlot(UMap_PvalbSeurat, features = c("Gad1","Ache", "Vip"))
+VlnPlot(UMap_PvalbSeurat, features = c("Pvalb","Fosl2", "Nr4a1"))
+VlnPlot(PVfirstfilt, features = c("Pvalb","Fosl2", "Nr4a1"))
+VlnPlot(NormalizedPVfilt, features = c("Pvalb","Fosl2", "Nr4a1"))
+VlnPlot(UMap_PvalbSeurat, features = c("Gabrg1","Gabrg2","Gabrg3"))
+VlnPlot(UMap_PvalbSeurat, features = c("Gabra1","Gabra2","Gabra3", "Gabra4", "Gabra5"))
+VlnPlot(PVfirstfilt, features = c("Gabra1","Gabra2","Gabra3", "Gabra4", "Gabra5"))
+
+VlnPlot(UMap_PvalbSeurat, features = c("Pvalb","Fos", "Npas4"))
+VlnPlot(PVfirstfilt, features = c("Pvalb","Fos", "Npas4"))
+VlnPlot(NormalizedPVfilt, features = c("Pvalb","Fos", "Npas4", "Penk"))
+```
+```{r}
+FeaturePlot(UMap_PvalbSeurat, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+
+FeaturePlot(UMap_PvalbSeurat, features = c("Fos","Npas4","Nr4a1", "Fosl2", "Nr4a3", "Junb"))
+FeaturePlot(UMap_PvalbSeurat, features = c("Pvalb","Adarb2","Gpc5", "Fos"))
+FeaturePlot(UMap_PvalbSeurat, features = c("Pvalb","Sorcs1","Ntng1"))
+FeaturePlot(UMap_PvalbSeurat, features = c("Etv1","Mef2c","Fosb"))
+FeaturePlot(UMap_PvalbSeurat, features = c("Pvalb","Adarb2","Fos"))
+FeaturePlot(UMap_PvalbSeurat, features = c("Acan","Cntnap4","Bcan"))
+FeaturePlot(UMap_PvalbSeurat, features = c("Pvalb","Sst","Ppp1r1b"))
+FeaturePlot(UMap_PvalbSeurat, features = c("Pvalb","Gfap","Sox10"))
+FeaturePlot(UMap_PvalbSeurat, features = c("Gapdh","Ache", "Vip"))
+FeaturePlot(UMap_PvalbSeurat, features = c("Pvalb","Fosl2", "Nr4a1"))
+FeaturePlot(PVfirstfilt, features = c("Pvalb","Fosl2", "Nr4a1"))
+FeaturePlot(NormalizedPVfilt, features = c("Pvalb","Fosl2", "Nr4a1"))
+
+FeaturePlot(UMap_PvalbSeurat, features = c("Pvalb","Fos", "Npas4"))
+FeaturePlot(PVfirstfilt, features = c("Pvalb","Fos", "Npas4"))
+FeaturePlot(NormalizedPVfilt, features = c("Pvalb","Fos", "Npas4"))
+```
+
+```{r}
+save.image(file = "/media/west-lab-share/David_Gallegos/10X/PVressurectnoMultiPvalb.RData") 
+
+```
+
+```{r}
+RidgePlot(UMap_PvalbSeurat, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+
+RidgePlot(UMap_PvalbSeurat, features = c("Fos","Npas4","Arc"))
+RidgePlot(UMap_PvalbSeurat, features = c("Pvalb","Adarb2","Gpc5"))
+RidgePlot(UMap_PvalbSeurat, features = c("Etv1","Mef2c","Fosb"))
+RidgePlot(UMap_PvalbSeurat, features = c("Acan","Cntnap4","Bcan"))
+RidgePlot(UMap_PvalbSeurat, features = c("Pvalb","Sst","Ppp1r1b"))
+RidgePlot(UMap_PvalbSeurat, features = c("Pvalb","Gfap","Sox10"))
+RidgePlot(UMap_PvalbSeurat, features = c("Cntnap2","Ache", "Vip"))
+```
+
+```{r}
+#Make topGodata object
+GOdata=new("topGOdata",
+           ontology="CC",
+           allGenes=all.genes,
+           geneSelectionFun=function(x)(x==1),
+           annot=annFUN.org,
+           mapping="org.Mm.eg.db",
+           ID="symbol")
+
+#test for enrichment
+resultFisher=runTest(GOdata,algorithm="elim", statistic="fisher")
+allRes=GenTable(GOdata,Fisher=resultFisher,topNodes=20,numChar=60)
+myTerms=c("GO:0098978","GO:0098982")
+myGenes=genesInTerm(GOdata,myTerms)
+myGenes1=unlist(myGenes[1])
+myGenes2=unlist(myGenes[2])
+DEGenes_GOterm1=which(myGenes1%in%interestinggenes)
+DEGenes_GOterm2=which(myGenes2%in%interestinggenes)
+DEGenes_GOterm1=myGenes1[DEGenes_GOterm1]
+DEGenes_GOterm2=myGenes2[DEGenes_GOterm2]
+allGO=genesInTerm(GOdata)
+ANNOTATION=lapply(allGO,function(x) x[x%in%])
+
+############################################
+#Plot for neurons
+FeaturePlot(UMap_Gad2Seurat, features = c("Gad2","Slc17a6","Rbfox3"))
+"Ddx3y", "Eif2s3y","Kdm5d"
+#Plot for Gad2 and vglut2 positive markers
+FeaturePlot(UMap_Gad2Seurat, features = c("Kcnh5","Kcnh8","Gm2694","Rspo3","Tmem163","Mpped2"))
+VlnPlot(UMap_Gad2Seurat, features = c("Kcnh5","Kcnh8","Gm2694","Rspo3","Tmem163","Mpped2"))
+#plotting raw counts
+VlnPlot(UMap_Gad2Seurat, features = c("Kcnh5","Kcnh8","Gm2694","Rspo3","Tmem163","Mpped2"),slot="counts",log=TRUE)
+FeaturePlot(UMap_Gad2Seurat, features = c("Kitl","Grik4","Vangl1","Ntng2","Trpm3","Cntn5"))
+FeaturePlot(UMap_Gad2Seurat, features = c("Arpp21","Pou6f2","Scube1","Robo1","Rmst","Kcnip4","Pbx1","Cacna1e"))
+FeaturePlot(UMap_Gad2Seurat, features = c("Ptprn2","Edil3","Nnat","Sema6d","Kcnq5","Sorcs3","Ebf1","Cdh10"))
+FeaturePlot(UMap_Gad2Seurat, features = c("Gad2","Slc17a6","Slc32a1","Gad1"))
+
+
+#heatmap of all
+DoHeatmap(UMap_Gad2Seurat, features=overlapping3and4) + NoLegend()
+
+
+"Tmem163","Grik4","Kitl","Vangl1"))
+#Plot for microglia
+FeaturePlot(UMap_Gad2Seurat, features = c("Trem2","Alox5ap","Tmem119","Cx3cr1"))
+#Plot for Macrophages
+FeaturePlot(UMap_Gad2Seurat, features = c("Mrc1"))
+#Plot for astrocytes
+FeaturePlot(UMap_Gad2Seurat, features = c("Aldoc","Slc6a11"))
+#Plot for Schwann cells
+FeaturePlot(UMap_Gad2Seurat, features = c("Mpz", "Gap43", "Ngfr"))
+#Plot for pericytes
+FeaturePlot(UMap_Gad2Seurat, features = c("Abcc9","Pdgfrb"))
+#Plot for oligodendrocytes, Gpr17 is Diff oligos
+FeaturePlot(UMap_Gad2Seurat, features = c("Olig1","Mog","Gpr17"))
+#Plot for endothelial
+FeaturePlot(UMap_Gad2Seurat, features = c("Cldn5"))
+#Plot for ependymal
+FeaturePlot(UMap_Gad2Seurat, features = c("Hdc"))
+#Plot for interneurons
+FeaturePlot(UMap_Gad2Seurat, features = c("Pvalb", "Sst", "Camk2a", "Drd2"))
+#Plot for fibroblasts
+FeaturePlot(UMap_Gad2Seurat, features = c("Pdgfra","Pdgfrb","Col3a1"))
+#Medial Habenula neurons
+FeaturePlot(UMap_Gad2Seurat, features = c("Tac2","Slc17a7","Snap25","Olig1"))
+#Lateral habenula neurons - we got mostly oval/medial
+FeaturePlot(UMap_Gad2Seurat, features = c("Gap43","Snap25","Slc17a6","Pbx3","Chrm3","Rbfox1"))
+#Plot for 
+
+#Nicotinic
+FeaturePlot(UMap_Gad2Seurat, features = c("Gpr151","Pbx3","Chrm3","Rbfox1"))
+#CLuster 1
+FeaturePlot(UMap_Gad2Seurat, features = c("Gabra4"))
+#Cluster 2
+FeaturePlot(UMap_Gad2Seurat, features = c("Grin2b","Calb1","Calb2","Kcnh5","Kcnh8","Gad2","Slc17a6"))
+#Cluster 3 - lack Cnr1 (cannabinoid receptor 1)
+FeaturePlot(UMap_Gad2Seurat, features = c("Cnr1"))
+#mGluRs
+FeaturePlot(UMap_Gad2Seurat, features = c("Htr2c","Htr5b","Sstr2","Cnr1","Gpr158","Lpar1","Adcyap1r1"))
+
+#Comparing two genes
+FeatureScatter(UMap_Gad2Seurat,feature1="Gad2",feature2="Slc17a6", cells=Cells.1)
+FeatureScatter(UMap_Gad2Seurat,feature1="Slc17a6",feature2="Rbfox3")
+
+#Heatmap
+DoHeatmap(UMap_Gad2Seurat, genes.use= c("Gad2", "Slc17a6", "Rbfox3"))
+Cells.Neurons=WhichCells(UMap_Gad2Seurat,ident=c(1,2,3,4,5))
+Cells.1=WhichCells(UMap_Gad2Seurat,ident=1)
+Cells.2=WhichCells(UMap_Gad2Seurat,ident=2)
+Cells.3=WhichCells(UMap_Gad2Seurat,ident=3)
+Cells.4=WhichCells(UMap_Gad2Seurat,ident=4)
+Cells.5=WhichCells(UMap_Gad2Seurat,ident=5)
+
+DoHeatmap(UMap_Gad2Seurat,features=c("Gad2","Slc17a6","Rbfox3"),cells=Cells.1)
+DoHeatmap(UMap_Gad2Seurat,features=c("Gad2","Slc32a1","Slc17a6"),cells=Cells.1)
+
+#Label clusters
+new.cluster.ids = c("microglia (0)", "excitatory neurons (1)", "neurons (2)", "neurons (3)", "interneurons (4)", "Medial habenula (5)", 
+                     "oligodendrocytes (6)", "unknown2 (7)", "astrocytes (8)","unknown3 (9)","unknown4 (10)","unknown5 (11)")
+names(new.cluster.ids) = levels(UMap_Gad2Seurat)
+UMap_Gad2Seurat=RenameIdents(UMap_Gad2Seurat, new.cluster.ids)
+DimPlot(UMap_Gad2Seurat, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+
+#Find differentially expressed markers
+Excitatory_neuron.de.markers=FindMarkers(pbmc, ident.1 =Cells.1, ident.2 = Cells.4,only.pos=TRUE)
+Interneuron.de.markers=FindMarkers(pbmc, ident.1 =Cells.4, ident.2 = Cells.1,only.pos=TRUE)
+
+
+#Use to search for gene names
+all.genes[grep("Npy",all.genes)
+
+#Searching within cluster3 and 4 markers for genes from Josh Huang's and other's work to see transcriptional profile
+list3and4=subset(Clusters_Gad2Seurat, idents=c("3", "4"))
+geneList=FindAllMarkers()
+
+
+list1and2=subset(Clusters_Gad2Seurat, idents=c("1", "2"))
+cluster.averages1and2=AverageExpression(object=list1and2, return.seurat = TRUE)
+cluster.averages=AverageExpression(object=list3and4, return.seurat = TRUE)
+head(cluster.averages)
+setwd('C:/Users/mattg/Desktop')
+listofgenes=read.delim('expression_mRNA_17-Aug-2014.txt')
+listofinhibitorygenerows=which(listofgenes[,2]==1)
+listofinhibitorygenes=listofgenes[listofinhibitorygenerows,1]
+head(listofinhibitorygenes)
+listofexcitatorygenerows=which(listofgenes[,2]==3)
+listofexcitatorygenes=listofgenes[listofexcitatorygenerows,1]
+listofexcitatorygenes[1]
+typeof(listofexcitatorygenes)
+head(listofexcitatorygenes)
+DoHeatmap(list3and4,features=listofinhibitorygenes)
+DoHeatmap(list3and4,features=listofexcitatorygenes)
+DoHeatmap(cluster.averages1and2,features=unlist(listofinhibitorygenes))
+DoHeatmap(cluster.averages1and2, features=unlist(listofexcitatorygenes))
+
+```
+
+
+# UMAP clustering already generated - need to find or regenerate parameters
+# data was scaled and log normalized
+
+```{r}
+JackStrawPlot(PV, dims = 1:20)
+
+# tried to do more than 20 but says there arent more. Memory tells me I did 30 on the UMAP
+```
+
+```{r}
+ElbowPlot(PV)
+```
+
+
+
+```{r}
+DimPlot(PV)
+```
+
+
+```{r}
+RidgePlot(PV, features = "Pvalb")
+```
+
+# Subset Seurat object with only PV positive clusters
+
+```{r}
+PV.only_Seurat
+```
+
+# Reclustered
+
+```{r}
+DimPlot(PV.only_Seurat)
+```
+
+```{r}
+VlnPlot(PV.only_Seurat, features = IEG.list)
+```
+
+#Subsetting dataset to include only cells expressing Fos
+```{r}
+Fos <- subset(PV.1, subset = Fos > 0)
+Fos
+FeatureScatter(Fos, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + geom_vline(xintercept = 500)
+```
+
+```{r}
+Fos <- NormalizeData(Fos, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+```{r}
+Fos <- FindVariableFeatures(Fos, selection.method = "vst", nfeatures = 2000)
+fos.top10 <- head(VariableFeatures(Fos), 10)
+fos.plot1 <- VariableFeaturePlot(Fos)
+fos.plot2 <- LabelPoints(plot = fos.plot1, points = fos.top10, repel = TRUE)
+fos.plot2
+```
+
+```{r}
+all.genes.fos <- rownames(Fos)
+Fos <- ScaleData(Fos, features = all.genes.fos)
+```
+
+```{r}
+Fos <- RunPCA(Fos, features = VariableFeatures(object = Fos))
+VizDimLoadings(Fos, dims = 1:2, reduction = "pca")
+```
+
+```{r}
+Fos <- JackStraw(Fos, num.replicate = 50)
+Fos <- ScoreJackStraw(Fos, dims = 1:15 )
+```
+
+```{r}
+JackStrawPlot(Fos, dims = 1:15)
+```
+
+```{r}
+ElbowPlot(Fos)
+```
+
+```{r}
+Fos <- FindNeighbors(Fos, dims = 1:6)
+Fos <- FindClusters(Fos, resolution = 0.5)
+```
+
+```{r}
+Fos <- RunUMAP(Fos, dims = 1:6)
+```
+
+```{r}
+DimPlot(Fos, reduction = "umap")
+```
+
+```{r}
+all.markers.fos <- FindAllMarkers(Fos)
+```
+```{r}
+all.markers.fos
+```
+```{r}
+all.markers.fos.sort <- all.markers.fos %>% as.data.frame()
+all.markers.fos.sort <- all.markers.fos.sort[order(all.markers.fos.sort$p_val),]
+all.markers.fos.sort
+```
+```{r}
+top.12.markers <- head(all.markers.fos.sort, 12)
+```
+
+
+```{r}
+write.csv(all.markers.fos.sort, file = "~/Desktop/Projects/Anne_West/Fos.only.cluster.markers.csv")
+```
+
+```{r}
+VlnPlot(Fos, features = top.12.markers$gene)
+```
+
+```{r}
+VlnPlot(Fos, features = c("Fos","Pvalb","Npas4"))
+```
+
+```{r}
+VlnPlot(Fos, features = c("Fos","Npas4","Fosl2","Nr4a3","Rbfox1","Runx2","Adarb2","Kcnip1"))
+```
+
+```{r}
+VlnPlot(Fos, features = c("Fos","Ccn1","Coq10b","Dusp1","Nr4a1","Ywhaz"))
+```
+
+```{r}
+VlnPlot(Fos, features = Glia.list)
+```
+
+```{r}
+VlnPlot(Fos, features = c(Neuron.list, "Adarb2", "Fos"))
+```
+
+```{r}
+Fos.clusters <- Fos$seurat_clusters
+typeof(Fos.clusters)
+Fos.clusters
+
+Fos.counts <- Fos$nCount_RNA
+
+Fos.df <- data_frame(Fos.clusters, Fos.counts)
+Fos.df
+```
+
+
+
