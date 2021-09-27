@@ -1,0 +1,305 @@
+---
+title: "PV SST RNA analysis"
+output: html_notebook
+---
+
+
+Loading packages and functions for analysis:
+```{r}
+##-Loading in packages 
+library(Rsubread)
+library(readxl)
+library(DESeq2)
+library(tidyverse)
+library(edgeR)
+
+# set working directory to file location
+
+# Loading in data
+#> Samples_QC: QC metrics for samples
+#> totalcounts: raw count matrix
+#> genes: vector of gene names
+load("../data/PV35minSalvAMPH_input.RData")
+
+#> gtf_annot: pre-processed gencode vM21 annotation file: gencode.vM21.chr_patch_hapl_scaff.annotation.gtf
+load("../data/mm10_vM21_gencode.RData")
+```
+
+# Defining functions
+```{r}
+# This funciton takes the counts and gets the 
+# RPKM value which is the counts normalized for 
+# depth per million then scaled by gene length
+# side note: RPKM is for single end, FPKM is 
+# for double end sequencing 
+countToRpkm <- function(counts, effLen) { 
+  depth = colSums(counts) 
+  scaled_depth = depth/1e9
+  mat = t(t(counts)/scaled_depth)
+  t(t(mat)/effLen)
+  }
+
+# this function takes the counts and gets the 
+# TPM value which is the counts normalized for
+# gene length and then scaled for depth per 
+# million
+countToTpm <- function(counts, effLen) { 
+  mat = counts/effLen
+  depth = colSums(mat) 
+  scaled_depth = depth/1e9
+  t(t(mat)/scaled_depth)
+}
+
+
+```
+
+# Preprocess data
+Samples: 
+```{r}
+head(Samples_QC)
+```
+
+Reading in genes counts from each gene region.
+```{r}
+## Get Gene length ##
+genes_annot = gtf_annot %>% 
+  filter(type %in% 'gene') %>% 
+  filter(!duplicated(gene_name)) %>% 
+  mutate(length = as.numeric(stop) - as.numeric(start))
+
+# length of example gene 
+genes_annot$length[which(genes_annot$gene_name %in% "0610007P14Rik")]
+
+genes[which(!(genes %in% genes_annot$gene_name) )]
+# length of all genes 
+gene_length = genes_annot$length[which(genes_annot$gene_name %in% genes)]
+
+```
+
+Filtering
+```{r}
+# removing Gm and Sno genes
+include = !(grepl("Gm[0-9][0-9]",genes) | grepl("Rnu",genes) | grepl("Sno",genes) | grepl("Snrp",genes)| grepl("Snh",genes))
+
+dim(totalcounts)[1] == length(genes) 
+genes_filt = genes[include]
+counts_filt = totalcounts[include,]
+
+# filtering the rpkm counts -- down to 28701
+gene_length_filt = gene_length[include]
+rpkm_filt = countToRpkm(counts_filt, gene_length_filt)
+tpm_filt = countToTpm(counts_filt, gene_length_filt)
+```
+
+
+# Differential Expression
+
+```{r}
+d = DGEList(counts=counts_filt, 
+            group=factor(Samples_QC$samples), 
+            genes=genes_filt)
+countsPerMillion <- cpm(d)
+summary(countsPerMillion)
+
+countCheck <- countsPerMillion > 1
+head(countCheck)
+
+keep <- which(rowSums(countCheck) >= 10)
+d <- d[keep,] #Filtered from 55570 genes to 14238 - change note on back end
+genes_filt=genes_filt[keep]
+gene_length_filt = gene_length[keep] 
+
+counts_filt=counts_filt[keep,]
+rpkm_filt = countToRpkm(counts_filt, gene_length_filt)
+tpm_filt = countToTpm(counts_filt, gene_length_filt)
+
+# writing data
+write_csv(data.frame(genes_filt, counts_filt), "../output/PV35minSalvAMPH_RNA/raw_counts_filt.csv")
+write_csv(data.frame(genes_filt, rpkm_filt), "../output/PV35minSalvAMPH_RNA/rpkm_counts_filt.csv")
+write_csv(data.frame(genes_filt, tpm_filt),  "../output/PV35minSalvAMPH_RNA/tpm_counts_filt.csv")
+```
+
+
+```{r}
+Samples_QC$rep <-paste0(Samples_QC$Replicate, Samples_QC$Treatment)
+Samples_QC$Treatment <- relevel(Samples_QC$Treatment, "Saline")
+dds<-DESeqDataSetFromMatrix(countData = d$counts, 
+                            colData = Samples_QC,
+                            design =  ~ samples + pbc + Replicate)
+dds<-DESeq(dds)
+
+```
+
+
+###Exploraring results 
+```{r, eval = T}
+#-Variance stabalizing the counts
+vsd <- vst(dds, blind =FALSE)
+mat <-assay(vsd)
+colnames(mat)=paste0(Samples_QC$samples, Samples_QC$Replicate)
+exp_mat<-data.frame(SYMBOL=genes_filt,
+                    mat)
+
+write.csv(exp_mat, "../output/PV35minSalvAMPH_RNA/VarianceStabilizedCounts.csv")
+head(exp_mat)
+```
+
+
+Here we show that the replicates are more like each other than the other sample types.
+```{r,  echo = F, eval = T}
+#-Clustering
+d<-dist(t(mat), method='euclidean') #distance matrix
+fit <-hclust(d, method ='ward.D') 
+plot(fit)
+```
+
+
+We also show similar clustering in a 2D and 3D pca plot.
+```{r, echo = F, eval = T}
+#-PCA
+mat.pca<-prcomp(t(mat))
+scores <-as.data.frame(mat.pca$x)
+
+cols = c("red", "blue", "black", "green", "lightblue", "orange")
+theme<-theme(panel.background = element_blank(),
+             panel.border=element_rect(fill=NA),
+             panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             strip.background=element_blank(),
+             axis.text.x=element_text(colour="black"),
+             axis.text.y=element_text(colour="black"),
+             axis.ticks=element_line(colour="black"),
+             plot.margin=unit(c(1,1,1,1),"line"),
+             legend.key = element_rect(fill = NA))
+
+
+pcaPlt = ggplot(scores,aes(x=PC1,y=PC2,color=Samples_QC$samples))+
+  geom_point(size = 3)+ 
+  geom_text(aes(label=Samples_QC$Replicate), nudge_x=2)+
+  theme+
+  labs(color='', x = paste0("PCA (", round(summary(mat.pca)$importance[2]*100,2), "%)"), y = paste0("PCA (", round(summary(mat.pca)$importance[5]*100,2), "%)")) 
+pcaPlt
+```
+
+```{r, echo = FALSE}
+summary(mat.pca)
+```
+
+```{r, echo = F}
+png("../output/PV35minSalvAMPH_RNA/Tree_vstCounts.png", height = 7, width = 12, units = 'in', res = 300)
+plot(fit)
+dev.off()
+
+png("../output/PV35minSalvAMPH_RNA/PCA.png", height = 7, width = 12, units = 'in', res = 300)
+pcaPlt
+dev.off()
+```
+
+
+
+```{r, eval = T, echo = F}
+##--Extracting resutlts from specific comparisions:
+amphIPvsalIP <- results(dds, contrast = c('samples','PV_IP_AMPH', 'PV_IP_SAL'))
+```
+
+```{r}
+p_c = .1
+lfc_c = 0
+
+exp_mat = exp_mat %>% 
+  mutate(amphIPVsalIP_padj = amphIPvsalIP$padj,
+         amphIPVsalIP_lfc = amphIPvsalIP$log2FoldChange,
+         amphIPvsalIP_sig = case_when( amphIPVsalIP_lfc > lfc_c & amphIPVsalIP_padj < p_c ~ "UP",
+                                       amphIPVsalIP_lfc < lfc_c & amphIPVsalIP_padj < p_c ~ "DOWN",
+                                       amphIPVsalIP_padj > p_c ~ "not sig",
+                                       is.na(amphIPVsalIP_padj) ~ "not sig"))
+
+
+head(exp_mat)
+```
+
+```{r}
+write_csv(exp_mat, "../output/PV35minSalvAMPH_RNA/diffExpressionMatrix.csv")
+write_csv(as.data.frame(amphIPvsalIP@listData), "../output/PV35minSalvAMPH_RNA/amphIPvsalIP.csv")
+```
+
+
+Volcano plots
+```{r figure 3E, fig.height=9, fig.width=14}
+gene_text_size = 7
+axis_text_size = 22
+title_size = 28
+
+
+volcano_p<-as.data.frame(amphIPvsalIP) %>%
+  mutate(SYMBOL = exp_mat$SYMBOL, sig = exp_mat$amphIPvsalIP_sig) %>%
+  mutate(LABEL = ifelse(exp_mat$amphIPvsalIP_sig %in% "not sig", "",as.character(exp_mat$SYMBOL)))%>%
+  mutate(GeneLabel = ifelse(as.character(SYMBOL) %in% c("Fos", "Egr3"), as.character(SYMBOL), "")) %>%
+   ggplot(aes(x = log2FoldChange, y = -log10(padj) ,color=exp_mat$amphIPvsalIP_sig ))+
+  geom_point(alpha = .8, size=3) + 
+  scale_x_continuous(limits = c(-2.3,2.1))+
+  #scale_y_continuous(limits = c(0, -log10(.01)))+
+  #geom_text(aes(x = log2FoldChange, y = -log10(padj), label=GeneLabel), vjust = 0, nudge_y = 0.1, size = gene_text_size)+
+  scale_color_manual(values = c("chartreuse1", "black", "forestgreen"), limits = c("DOWN", "not sig", "UP"))+
+  theme_bw() +
+  geom_vline(xintercept = c(lfc_c, -lfc_c), color = "black", linetype = "solid")+
+  geom_hline(yintercept = -log10(p_c), color = "grey", linetype = "dashed")+
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "AMPH IP/ SAL IP", y = "-log10(pvalue)\n", x="log2(FC)", color="")
+
+
+volcano_p
+
+```
+
+
+```{r}
+gene_text_size = 5
+axis_text_size = 18
+title_size = 24
+
+
+ma_p <-as.data.frame(amphIPvsalIP) %>%
+  mutate(SYMBOL = as.character(exp_mat$SYMBOL), 
+         sig = exp_mat$amphIPvsalIP_sig) %>%
+  mutate(LABEL = ifelse(sig %in% "not sig", "",SYMBOL))%>%
+  ggplot(aes(y = log2FoldChange, x = log10(baseMean) ,color=sig ))+
+  geom_point(aes(size = sig), alpha = .3) +
+  scale_size_manual(values = c(3,.5,3), limits = c("DOWN", "not sig", "UP")) +
+  geom_text(aes(y = log2FoldChange, x = log10(baseMean), label=LABEL), vjust = 0, nudge_x = 0.1, size = gene_text_size)+
+  scale_color_manual(values = c("red", "black", "green"), limits = c("DOWN", "not sig", "UP"))+
+  theme_bw() +
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "AMPH/SAL UF", x = "Base Mean", y="log2(FC)", color="")
+
+
+ma_p
+```
+
+```{r}
+# saving volanco and MA plot
+png( "../output/PV35minSalvAMPH_RNA/volcano.png",height = 10, width = 20, units = 'in', res = 300)
+volcano_p
+dev.off()
+
+png( "../output/PV35minSalvAMPH_RNA//MA.png", height = 10, width = 20, units = 'in', res = 300, bg = "transparent")
+ma_p
+dev.off()
+```
+
+Looking at individual genes 
+```{r}
+geneOfInterest = "Sst"
+plotCounts(dds, gene =which(genes_filt %in% geneOfInterest), intgroup = "samples" , col = Samples_QC$Replicate, main =geneOfInterest)
+```
+
+```{r}
+#saving file and data
+save.image("../output/PV35minSalvAMPH_RNA/PV35minSalvAMPH_RNA_output.RData")
+```

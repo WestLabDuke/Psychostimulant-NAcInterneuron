@@ -1,0 +1,866 @@
+---
+title: "PV SST RNA analysis"
+output: html_notebook
+---
+
+
+Loading packages and functions for analysis:
+```{r, echo = FALSE}
+##-Loading in packages 
+library(knitr)
+library(Rsubread)
+library(readxl)
+library(readr)
+library(DESeq2)
+library(pheatmap)
+library(corrplot)
+library(Rsubread)
+library(tidyverse)
+library(annotate)
+library(org.Mm.eg.db)
+library(VennDiagram)
+library(foreach)
+library(biomaRt)
+library(TxDb.Mmusculus.UCSC.mm10.knownGene)
+library(edgeR)
+
+load("/media/west-lab-share/Melyssa_Minto/PV_SST/RNASeq/QCRDATA")
+linux_path<-"/media/west-lab-share/David_Gallegos/GencodeAlignments/DeseqOutput"
+source("/media/west-lab-share/Melyssa_Minto/PV_SST/Scripts/BamStats.R")
+
+path<-linux_path
+```
+
+```{r, echo=F}
+system(paste0("mkdir ", linux_path,"/Output_",format(Sys.time(), "PV3Hrtriplecheck2_QC_022021_%m%d%Y") ))
+system(paste0("mkdir ", linux_path,"/Output_",format(Sys.time(), "PV3HrTtriplecheck2_QC_022021_%m%d%Y"), "/Figures" ))
+pathFig = (paste0( linux_path,"/Output_",format(Sys.time(), "PV3Hrtriplecheck2_QC_022021_%m%d%Y"), "/Figures" ))
+path = (paste0( linux_path,"/Output_",format(Sys.time(), "PV3Hrtriplecheck2_QC_022021_%m%d%Y") ))
+```
+
+# Preprocess data
+Samples: 
+```{r, echo = F}
+head(Samples)
+```
+
+Reading in genes counts from each gene region.
+```{r}
+# this funciton will get the elements in a gtf 
+# file that is after a specific search string
+
+parse_gtf <- function(string, vector){
+  message('parsing out ', string)
+  parseString = paste0(string, '(.*?)\\;')
+  tmp =  str_replace_all(vector, "\"", " ")  
+  element = apply(as.matrix(tmp), 1, function(x) 
+    trimws(regmatches(x, regexec(parseString, x))[[1]][2]) )
+  return(element)
+}
+
+
+# This funciton takes the counts and gets the 
+# RPKM value which is the counts normalized for 
+# depth per million then scaled by gene length
+# side note: RPKM is for single end, FPKM is 
+# for double end sequencing 
+countToRpkm <- function(counts, effLen) { 
+  depth = colSums(counts) 
+  scaled_depth = depth/1e9
+  mat = t(t(counts)/scaled_depth)
+  t(t(mat)/effLen)
+  }
+
+# this function takes the counts and gets the 
+# TPM value which is the counts normalized for
+# gene length and then scaled for depth per 
+# million
+countToTpm <- function(counts, effLen) { 
+  mat = counts/effLen
+  depth = colSums(mat) 
+  scaled_depth = depth/1e9
+  t(t(mat)/scaled_depth)
+  }
+
+# the differences between these two is that the 
+# sum of each column after nomalization is the 
+# same after tpm where as they are different 
+# with rpkm.Thus TPM values and their relative
+# contributions are comparable 
+#############################################################################################################
+
+## get gene names ##
+genes = read_delim(paste0(Samples$PathToFolder[1], "gene.reads"), "\t", escape_double = FALSE, col_names = FALSE, trim_ws = TRUE)$X1
+
+genes = genes[!c(grepl("__no_feature", genes)| 
+                   grepl("__ambiguous", genes)| 
+                   grepl("__too_low_aQual", genes)|  
+                   grepl("__not_aligned", genes)| 
+                   grepl("__alignment_not_unique", genes))]
+
+
+## Extracting GTF ##
+gtf_annot<- read_delim("/media/west-lab-share/genomeData/mm10/gencode/gencode.vM21.chr_patch_hapl_scaff.annotation.gtf", 
+                          "\t", quote = "\\\"", escape_double = FALSE, 
+                          col_names = FALSE, comment = "#", trim_ws = TRUE)
+
+colnames(gtf_annot) <- c("chr", "source", "type", "start", "stop", "score", "strand", "numElements", "toParse")
+
+# tag
+gtf_annot$tag = parse_gtf("tag", gtf_annot$toParse)
+
+# gene info
+gtf_annot$gene_id = parse_gtf("gene_id", gtf_annot$toParse)
+gtf_annot$gene_version = parse_gtf("gene_version", gtf_annot$toParse)
+gtf_annot$gene_name = parse_gtf("gene_name", gtf_annot$toParse)
+gtf_annot$gene_source = parse_gtf("gene_source", gtf_annot$toParse)
+gtf_annot$gene_biotype = parse_gtf("gene_biotype", gtf_annot$toParse)
+gtf_annot$havana_gene = parse_gtf("havana_gene", gtf_annot$toParse)
+gtf_annot$havana_gene_version = parse_gtf("havana_gene_version", gtf_annot$toParse)
+
+# transcript info
+gtf_annot$transcript_name = parse_gtf("transcript_name", gtf_annot$toParse)
+gtf_annot$transcript_source = parse_gtf("transcript_source", gtf_annot$toParse)
+gtf_annot$transcript_biotype = parse_gtf("transcript_biotype", gtf_annot$toParse)
+gtf_annot$havana_transcript = parse_gtf("havana_transcript", gtf_annot$toParse)
+gtf_annot$havana_transcript_version = parse_gtf("havana_transcript_version", gtf_annot$toParse)
+gtf_annot$transcript_support_level = parse_gtf("transcript_support_level", gtf_annot$toParse)
+gtf_annot$processed_transcript = parse_gtf("processed_transcript", gtf_annot$toParse)
+
+# exon info
+gtf_annot$exon_number = parse_gtf("exon_number", gtf_annot$toParse)
+gtf_annot$exon_version = parse_gtf("exon_version", gtf_annot$toParse)
+
+# ccd info
+gtf_annot$ccds_id = parse_gtf("ccds_id", gtf_annot$toParse)
+
+# protein info
+gtf_annot$protein_id = parse_gtf("protein_id", gtf_annot$toParse)
+gtf_annot$protein_version = parse_gtf("protein_version", gtf_annot$toParse)
+
+## Get Gene length ##
+genes_annot = gtf_annot %>% 
+  filter(type %in% 'gene') %>% 
+  filter(!duplicated(gene_name)) %>% 
+  mutate(length = as.numeric(stop) - as.numeric(start))
+
+# length of example gene 
+genes_annot$length[which(genes_annot$gene_name %in% "0610007P14Rik")]
+
+genes[which(!(genes %in% genes_annot$gene_name) )]
+# length of all genes 
+gene_length = genes_annot$length[which(genes_annot$gene_name %in% genes)] 
+
+
+## Normalize counts ##
+colnames(totalcounts) <- paste0(Samples_QC$samples, Samples_QC$ID)
+counts_rpkm = countToRpkm(totalcounts, gene_length)
+counts_tpm = countToTpm(totalcounts, gene_length)
+
+colSums(counts_tpm)
+colSums(counts_rpkm)
+
+## write fpkm and tpm counts ##
+write_csv(data.frame(genes, totalcounts), paste0(path, "/v2raw_counts.csv"))
+write_csv(data.frame(genes, counts_rpkm), paste0(path, "/v2rpkm_counts.csv"))
+write_csv(data.frame(genes, counts_tpm), paste0(path, "/v2tpm_counts.csv"))
+
+head(totalcounts)
+head(as.data.frame(counts_rpkm))
+head(as.data.frame(counts_tpm))
+
+```
+
+Filtering
+```{r}
+# removing Gm and Sno genes
+include = !(grepl("Gm[0-9][0-9]",genes) | grepl("Rnu",genes) | grepl("Sno",genes) | grepl("Snrp",genes)| grepl("Snh",genes))
+
+dim(totalcounts)[1] == length(genes) 
+genes_filt = genes[include]
+counts_filt = totalcounts[include,]
+
+# filtering the rpkm counts -- down to 28701
+gene_length_filt = gene_length[include]
+rpkm_filt = countToRpkm(counts_filt, gene_length_filt)
+tpm_filt = countToTpm(counts_filt, gene_length_filt)
+
+# writing data
+write_csv(data.frame(genes_filt, counts_filt), paste0(path, "/recheckGEOraw_counts_filt.csv"))
+write_csv(data.frame(genes_filt, rpkm_filt), paste0(path, "/recheckGEOrpkm_counts_filt.csv"))
+write_csv(data.frame(genes_filt, tpm_filt), paste0(path, "/recheckGEOtpm_counts_filt.csv"))
+```
+
+
+# Differential Expression
+
+Using DEseq (v 1.14.1) the log2 fold change of differential peaks will be calulated and compared.
+```{r,  echo = T, eval = F}
+#filtering counts per million using EdgeR
+
+#Samples_QC$UF_Comp = paste0(Samples_QC$Treatment, Samples_QC$IPvUF)
+
+
+#Samples_QC$ID=as.factor(Samples_QC$ID)
+#Samples_QC$Timepoint=as.factor(Samples_QC$Timepoint)
+
+d = DGEList(counts=counts_filt, 
+            group=factor(Samples$samples), 
+            genes=genes_filt)
+countsPerMillion <- cpm(d)
+summary(countsPerMillion)
+
+countCheck <- countsPerMillion > 1
+head(countCheck)
+
+keep <- which(rowSums(countCheck) >= 6)
+d <- d[keep,] #Filtered from 55570 genes to 14238 - change note on back end
+genes_filt=genes_filt[keep]
+gene_length_filt = gene_length[keep] 
+
+counts_filt=counts_filt[keep,]
+rpkm_filt = countToRpkm(counts_filt, gene_length_filt)
+tpm_filt = countToTpm(counts_filt, gene_length_filt)
+
+# writing  
+#write_csv(data.frame(genes_filt, counts_filt), paste0(path, "/recheckraw_counts_filt.csv"))
+#write_csv(data.frame(genes_filt, rpkm_filt), paste0(path, "/recheckrpkm_counts_filt.csv"))
+#write_csv(data.frame(genes_filt, tpm_filt), paste0(path, "/rechecktpm_counts_filt.csv"))
+#performing DeseQ
+Samples_QC$rep <-paste0(Samples_QC$Replicate, Samples_QC$Treatment)
+Samples_QC$Treatment <- relevel(Samples_QC$Treatment, "Saline")
+dds<-DESeqDataSetFromMatrix(countData = d$counts, 
+                            colData = Samples_QC,
+                            design =  ~ samples + pbc + Replicate)
+dds<-DESeq(dds)
+
+
+
+#EdgeR norm
+# ?calcNormFactors
+# d <- calcNormFactors(d, method="TMM")
+
+# #EdgeR data exploration
+# plotMDS(d)
+# 
+# #edgeR setting up model
+# #sampleType<- rep("N", ncol(d))
+# #sampleType[grep("T", colnames(d))] <- "T"
+# 
+# sampleReplicate <- paste("S", rep(1:3, each=2), sep="")
+# 
+# designMat <-model.matrix(~0+Samples_QC$samples + Samples_QC$pbc +Samples_QC$Lane)
+# designMat
+# colnames(designMat) <- c("PV_IP_AMPH", "PV_IP_SAL", "PV_UF_AMPH","PV_UF_SAL", "pbc", "Lane")
+# #estimating dispersions
+# d <- estimateGLMCommonDisp(d, design=designMat)
+# d <- estimateGLMTrendedDisp(d, design=designMat)
+# d <- estimateGLMTagwiseDisp(d, design=designMat)
+# 
+# plotBCV(d)
+# 
+# #Diffex
+# fit <- glmFit(d, designMat)
+# #lrt <- glmLRT(fit, coef=4)
+# amphIPvUF_con= makeContrasts(contrasts=sprintf("%s-%s", "PV_IP_AMPH", "PV_UF_AMPH"), levels=designMat) # Make contrast
+# amphIPvUF_lrt <- glmLRT(fit, contrast=amphIPvUF_con) 
+# #amphIPvUF_result <- topTags(amphIPvUF_lrt) 
+# 
+# amphIPvUF_result <- topTags(amphIPvUF_lrt, n="all")
+# amphIP_UFdetable=amphIPvUF_result$table
+# 
+# is.de <- amphIP_UFdetable$FDR <= 0.05 & abs(amphIP_UFdetable$logFC) >= 1
+# amphIP_UFdetable <- amphIP_UFdetable[is.de,]
+# 
+# amphIPvSalIP_con= makeContrasts(contrasts=sprintf("%s-%s", "PV_IP_AMPH", "PV_IP_SAL"), levels=designMat) # Make contrast
+# amphIPvSalIP_lrt <- glmLRT(fit, contrast=amphIPvSalIP_con) 
+# amphIPvSalIP_result <- topTags(amphIPvSalIP_lrt, n="all")
+# amphIPvSalIPdetable=amphIPvSalIP_result$table
+# is.de <- amphIPvSalIPdetable$PValue <= 0.011
+# amphIPvSalIPdetable <- amphIPvSalIPdetable[is.de,]
+# 
+# length(which(amphIPvSalIPdetable$FDR <= 0.1  & abs(amphIPvSalIPdetable$logFC) >= .8))
+# 
+# ?topTags
+# 
+# save(topTags(lrt,n=15000)$table, file='edgeR_result.RData')
+# 
+# ?decideTests
+# deGenes <- decideTestsDGE(lrt, p=.1)
+# deGenes <- rownames(lrt)[as.logical(deGenes)]
+# plotSmear(lrt, de.tags=deGenes)
+# abline(h=c(-1,1), col=2)
+```
+
+
+```{r, echo = F,eval = F}
+#saving file and data
+save.image(paste0(path, "/filedataSST35minSalVAMPHFigure2SUBMISSION.RData")) 
+```
+
+
+###Exploraring results 
+```{r, eval = T}
+#-Variance stabalizing the counts
+vsd <- vst(dds, blind =FALSE)
+mat <-assay(vsd)
+colnames(mat)=paste0(Samples_QC$samples, Samples_QC$Replicate)
+exp_mat<-data.frame(SYMBOL=genes_filt,
+                    mat)
+
+write.csv(exp_mat, paste0(path, "/VarianceStabilizedCounts.csv"))
+head(exp_mat)
+```
+
+
+Here we show that the replicates are more like each other than the other sample types.
+```{r,  echo = F, eval = T}
+#-Clustering
+d<-dist(t(mat), method='euclidean') #distance matrix
+fit <-hclust(d, method ='ward.D') 
+plot(fit)
+```
+
+
+We also show similar clustering in a 2D and 3D pca plot.
+```{r, echo = F, eval = T}
+#-PCA
+mat.pca<-prcomp(t(mat))
+scores <-as.data.frame(mat.pca$x)
+
+cols = c("red", "blue", "black", "green", "lightblue", "orange")
+theme<-theme(panel.background = element_blank(),
+             panel.border=element_rect(fill=NA),
+             panel.grid.major = element_blank(),
+             panel.grid.minor = element_blank(),
+             strip.background=element_blank(),
+             axis.text.x=element_text(colour="black"),
+             axis.text.y=element_text(colour="black"),
+             axis.ticks=element_line(colour="black"),
+             plot.margin=unit(c(1,1,1,1),"line"),
+             legend.key = element_rect(fill = NA))
+
+
+pcaPlt = ggplot(scores,aes(x=PC1,y=PC2,color=Samples$samples))+
+  geom_point(size = 3)+ 
+  geom_text(aes(label=Samples_QC$Replicate), nudge_x=2)+
+  theme+
+  labs(color='', x = paste0("PCA (", round(summary(mat.pca)$importance[2]*100,2), "%)"), y = paste0("PCA (", round(summary(mat.pca)$importance[5]*100,2), "%)")) 
+pcaPlt
+```
+
+```{r, echo = F}
+png(paste0(pathFig, "/Tree_vstCountss.png"), height = 7, width = 12, units = 'in', res = 300)
+plot(fit)
+dev.off()
+
+png(paste0(pathFig, "/PCA.png"), height = 7, width = 12, units = 'in', res = 300)
+pcaPlt
+dev.off()
+```
+PC1 explains `r paste0(round(summary(mat.pca)$importance[2]*100,2), "%")`  of the variance. PC's 1-15 Cumulatively explain 98% of the variance.
+```{r, echo = FALSE}
+summary(mat.pca)
+```
+
+```{r, eval = T, echo = F}
+##--Extracting resutlts from specific comparisions:
+
+
+#amphIPvUF  <- results(dds, contrast = c('samples','PV_IP_AMPH', 'PV_UF_AMPH'))
+#salIPvUF  <- results(dds, contrast = c('samples','PV_IP_SAL', 'PV_UF_SAL'))
+
+#amphIPvsalIP <- results(dds, contrast = c('samples','PV_IP_AMPH', 'PV_IP_SAL'))
+#amphUFvsalUF <- results(dds, contrast = c('samples','PV_UF_AMPH', 'PV_UF_SAL'))
+
+
+#amphUFvsalUF  <- results(dds, contrast = c('Treatment','Amph', 'Saline'))
+
+amphIPvUF  <- results(dds, contrast = c('samples','SST_IP_AMPH', 'SST_UF_AMPH'))
+salIPvUF  <- results(dds, contrast = c('samples','SST_IP_SAL', 'SST_UF_SAL'))
+
+amphIPvsalIP <- results(dds, contrast = c('samples','SST_IP_AMPH', 'SST_IP_SAL'))
+amphUFvsalUF <- results(dds, contrast = c('samples','SST_UF_AMPH', 'SST_UF_SAL'))
+```
+
+```{r}
+p_c = .1
+lfc_c = 0
+
+# Setting all adjusted p values to 1 then recalculating pvalue of all KNOWN genes
+exp_mat$amphIPvUF_padj = amphIPvUF$padj
+exp_mat$salIPvUF_padj = salIPvUF$padj
+exp_mat$amphIPVsalIP_padj = amphIPvsalIP$padj
+exp_mat$amphUFVsalUF_padj = amphUFvsalUF$padj
+
+# adding log fold change
+exp_mat$amphIPvUF_lfc= amphIPvUF$log2FoldChange
+exp_mat$salIPvUF_lfc = salIPvUF$log2FoldChange
+exp_mat$amphIPVsalIP_lfc = amphIPvsalIP$log2FoldChange
+exp_mat$amphUFVsalUF_lfc = amphUFvsalUF$log2FoldChange
+
+# determining significance
+exp_mat$amphIPvUF_sig = NA
+exp_mat$amphIPvUF_sig[(amphIPvUF$log2FoldChange) > lfc_c & exp_mat$amphIPvUF_padj<p_c] <-"UP"
+exp_mat$amphIPvUF_sig[(amphIPvUF$log2FoldChange) < lfc_c & exp_mat$amphIPvUF_padj<p_c] <-"DOWN"
+exp_mat$amphIPvUF_sig[is.na(exp_mat$amphIPvUF_sig)] <-"not sig"
+
+exp_mat$salIPvUF_sig = NA
+exp_mat$salIPvUF_sig[(salIPvUF$log2FoldChange) >lfc_c & exp_mat$salIPvUF_padj<p_c] <-"UP"
+exp_mat$salIPvUF_sig[(salIPvUF$log2FoldChange) < lfc_c & exp_mat$salIPvUF_padj<p_c] <-"DOWN"
+exp_mat$salIPvUF_sig[is.na(exp_mat$salIPvUF_sig)] <-"not sig"
+
+exp_mat$amphIPvsalIP_sig = NA
+exp_mat$amphIPvsalIP_sig[(amphIPvsalIP$log2FoldChange) >lfc_c & exp_mat$amphIPVsalIP_padj<p_c] <-"UP"
+exp_mat$amphIPvsalIP_sig[(amphIPvsalIP$log2FoldChange) < lfc_c & exp_mat$amphIPVsalIP_padj<p_c] <-"DOWN"
+exp_mat$amphIPvsalIP_sig[is.na(exp_mat$amphIPvsalIP_sig)] <-"not sig"
+
+exp_mat$amphUFvsalUF_sig = NA
+exp_mat$amphUFvsalUF_sig[(amphUFvsalUF$log2FoldChange) >lfc_c & exp_mat$amphUFVsalUF_padj<p_c] <-"UP"
+exp_mat$amphUFvsalUF_sig[(amphUFvsalUF$log2FoldChange) < lfc_c & exp_mat$amphUFVsalUF_padj<p_c] <-"DOWN"
+exp_mat$amphUFvsalUF_sig[is.na(exp_mat$amphUFvsalUF_sig)] <-"not sig"
+
+#View(exp_mat)
+summaryDE = data.frame(UP = c(table(exp_mat$amphIPvsalIP_sig)["UP"], table(exp_mat$amphIPvUF_sig)["UP"], table(exp_mat$salIPvUF_sig)["UP"], table(exp_mat$amphUFvsalUF_sig)["UP"]),
+          DOWN = c(table(exp_mat$amphIPvsalIP_sig)["DOWN"], table(exp_mat$amphIPvUF_sig)["DOWN"], table(exp_mat$salIPvUF_sig)["DOWN"], table(exp_mat$amphUFvsalUF_sig)["DOWN"]),
+          row.names = c("amphIPvsalIP","amphIPvUF","salIPvUF", "amphUFvsalUF"  ) )
+
+summaryDE$total = summaryDE$UP + summaryDE$DOWN
+summaryDE$names= c("amphIPvsalIP","amphIPvUF","salIPvUF", "amphUFvsalUF"  ) 
+
+
+head(exp_mat)
+```
+
+```{r}
+write_csv(summaryDE, paste0(path, "/test4colcpmsummaryDE.csv"))
+write_csv(exp_mat, paste0(path, "/test4colfiltdiffExpressionMatrix.csv"))
+write_csv(as.data.frame(amphIPvUF@listData), paste0(path,"/amphIPvUF2.csv"))
+write_csv(as.data.frame(salIPvUF@listData), paste0(path, "/salIPvUF.csv"))
+write_csv(as.data.frame(amphIPvsalIP@listData), paste0(path, "/amphIPvsalIP2.csv"))
+write_csv(as.data.frame(amphUFvsalUF@listData), paste0(path, "/amphUFvsalUF2.csv"))
+```
+
+Volcano plots
+```{r, fig.height=9, fig.width=14}
+gene_text_size = 7
+axis_text_size = 22
+title_size = 28
+
+p1<-as.data.frame(amphIPvUF) %>%
+  mutate(SYMBOL = exp_mat$SYMBOL, sig = exp_mat$amphIPvUF_sig) %>%
+  mutate(LABEL = ifelse(exp_mat$amphIPvUF_sig %in% "not sig", "",as.character(exp_mat$SYMBOL)))%>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj) ,color=sig ))+
+  geom_point(alpha = .8, size=3) +
+  scale_x_continuous(limits = c(-8,8))+
+  #geom_text(aes(x = log2FoldChange, y = -log10(padj), label=LABEL), vjust = 0, nudge_y = 0.5, size = gene_text_size)+
+  scale_color_manual(values = c("chartreuse1", "black", "forestgreen"), limits = c("DOWN", "not sig", "UP"))+
+  theme_bw() +
+  geom_vline(xintercept = c(lfc_c, -lfc_c), color = "black", linetype = "solid")+
+  geom_hline(yintercept = -log10(p_c), color = "grey", linetype = "dashed")+
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "AMPH IP/UF\n", y = "-log10(pvalue)\n", x="log2(FC)", color="")
+
+p2<-as.data.frame(salIPvUF) %>%
+  mutate(SYMBOL = exp_mat$SYMBOL, sig = exp_mat$salIPvUF_sig) %>%
+  mutate(LABEL = ifelse(exp_mat$salIPvUF_sig %in% "not sig", "",as.character(exp_mat$SYMBOL)))%>%
+   ggplot(aes(x = log2FoldChange, y = -log10(padj) ,color=exp_mat$salIPvUF_sig ))+
+  geom_point(alpha = .8, size=3) +
+  scale_x_continuous(limits = c(-4.6,4.6))+
+   # geom_text(aes(x = log2FoldChange, y = -log10(pdj), label=LABEL), vjust = 0, nudge_y = 0.5, size = gene_text_size)+
+  scale_color_manual(values = c("darkorchid4", "black", "forestgreen"), limits = c("DOWN", "not sig", "UP"))+
+  theme_bw() +
+  geom_vline(xintercept = c(lfc_c, -lfc_c), color = "black", linetype = "solid")+
+  geom_hline(yintercept = -log10(p_c), color = "grey", linetype = "dashed")+
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "SAL IP/UF\n", y = "-log10(pvalue)\n", x="log2(FC)", color="")
+
+
+p3<-as.data.frame(amphIPvsalIP) %>%
+  mutate(SYMBOL = exp_mat$SYMBOL, sig = exp_mat$amphIPvsalIP_sig) %>%
+  mutate(LABEL = ifelse(exp_mat$amphIPvsalIP_sig %in% "not sig", "",as.character(exp_mat$SYMBOL)))%>%
+  mutate(GeneLabel = ifelse(as.character(SYMBOL) %in% c("Fos", "Egr3"), as.character(SYMBOL), "")) %>%
+   ggplot(aes(x = log2FoldChange, y = -log10(padj) ,color=exp_mat$amphIPvsalIP_sig ))+
+  geom_point(alpha = .8, size=3) + 
+  scale_x_continuous(limits = c(-2.3,2.1))+
+  #scale_y_continuous(limits = c(0, -log10(.01)))+
+
+  #geom_text(aes(x = log2FoldChange, y = -log10(padj), label=GeneLabel), vjust = 0, nudge_y = 0.1, size = gene_text_size)+
+  scale_color_manual(values = c("chartreuse1", "black", "forestgreen"), limits = c("DOWN", "not sig", "UP"))+
+  theme_bw() +
+  geom_vline(xintercept = c(lfc_c, -lfc_c), color = "black", linetype = "solid")+
+  geom_hline(yintercept = -log10(p_c), color = "grey", linetype = "dashed")+
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "AMPH IP/ SAL IP", y = "-log10(pvalue)\n", x="log2(FC)", color="")
+
+
+p4<-as.data.frame(amphUFvsalUF) %>%
+  mutate(SYMBOL = exp_mat$SYMBOL, sig = exp_mat$amphUFvsalUF_sig) %>%
+  mutate(LABEL = ifelse(exp_mat$amphUFvsalUF_sig %in% "not sig", "",as.character(exp_mat$SYMBOL)))%>%
+  mutate(GeneLabel = ifelse(SYMBOL %in% c("Fos", "Egr3"), SYMBOL, "")) %>%
+  ggplot(aes(x = log2FoldChange, y = -log10(padj) ,color=exp_mat$amphUFvsalUF_sig ))+
+  geom_point(alpha = .8, size=3) +
+  scale_x_continuous(limits = c(-1.2,1.2))+
+  #geom_text(aes(x = log2FoldChange, y = -log10(padj), label=GeneLabel), vjust = 0, nudge_y = 0.1, size = gene_text_size)+
+  scale_color_manual(values = c("darkorchid1", "black", "darkslateblue"), limits = c("DOWN", "not sig", "UP"))+
+  scale_y_continuous(limits = c(0, -log10(.00001)))+
+  theme_bw() +
+  geom_vline(xintercept = c(lfc_c, -lfc_c), color = "black", linetype = "solid")+
+  geom_hline(yintercept = -log10(p_c), color = "grey", linetype = "dashed")+
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "AMPH UF / SAL UF", y = "-log10(pvalue)\n", x="log2(FC)", color="")
+
+p1
+p2
+p3
+p4
+
+```
+
+```{r}
+png( paste0(pathFig,"/AMPH_IPvUF.png"),height = 10, width = 20, units = 'in', res = 300)
+p1
+dev.off()
+
+png( paste0(pathFig,"/SAL_IPvUF.png"),height = 10, width = 20, units = 'in', res = 300)
+p2
+dev.off()
+
+png( paste0(pathFig,"/AMPH_IPvSAL_IP.png"),height = 10, width = 20, units = 'in', res = 300)
+p3
+dev.off()
+
+png( paste0(pathFig,"/AMPH_UFvSAL_UF.png"),height = 10, width = 20, units = 'in', res = 300)
+p4
+dev.off()
+```
+
+```{r}
+
+gene_text_size = 5
+axis_text_size = 18
+title_size = 24
+
+p5<-as.data.frame(amphIPvUF) %>%
+  mutate(SYMBOL = as.character(exp_mat$SYMBOL), 
+         sig = exp_mat$amphIPvUF_sig) %>%
+  mutate(LABEL = ifelse(sig %in% "not sig", "",SYMBOL))%>%
+  ggplot(aes(y = log2FoldChange, x = log10(baseMean) ,color=sig ))+
+  geom_point(alpha = .3) +
+  scale_size_manual(values = c(3,.5,3), limits = c("DOWN", "not sig", "UP")) +
+  geom_text(aes(y = log2FoldChange, x = log10(baseMean), label=LABEL), vjust = 0, nudge_x = 0.1, size = gene_text_size)+
+  scale_color_manual(values = c("red", "black", "green"), limits = c("DOWN", "not sig", "UP"))+
+  theme_bw() +
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "AMPH IP/UF", x = "Base Mean", y="log2(FC)", color="")
+
+
+p6<-as.data.frame(salIPvUF) %>%
+  mutate(SYMBOL = as.character(exp_mat$SYMBOL), 
+         sig = exp_mat$salIPvUF_sig) %>%
+  mutate(LABEL = ifelse(sig %in% "not sig", "",SYMBOL))%>%  
+  ggplot(aes(y = log2FoldChange, x = log10(baseMean) ,color=sig ))+
+  geom_point(alpha = .3) +
+  scale_size_manual(values = c(3,.5,3), limits = c("DOWN", "not sig", "UP")) +
+  geom_text(aes(y = log2FoldChange, x = log10(baseMean), label=LABEL), vjust = 0, nudge_x = 0.1, size = gene_text_size)+
+  scale_color_manual(values = c("red", "black", "green"), limits = c("DOWN", "not sig", "UP"))+
+  theme_bw() +
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "SAL IP/UF", x = "Base Mean", y="log2(FC)", color="")
+
+
+p7<-as.data.frame(amphIPvsalIP) %>%
+  mutate(SYMBOL = as.character(exp_mat$SYMBOL), 
+         sig = exp_mat$amphIPvsalIP_sig) %>%
+  mutate(LABEL = ifelse(sig %in% "not sig", "",SYMBOL))%>%  
+  ggplot(aes(y = log2FoldChange, x = log10(baseMean) ,color=sig ))+
+  geom_point(alpha = .3) +
+  scale_size_manual(values = c(3,.5,3), limits = c("DOWN", "not sig", "UP")) +
+  geom_text(aes(y = log2FoldChange, x = log10(baseMean), label=LABEL), vjust = 0, nudge_x = 0.1, size = gene_text_size)+
+  scale_color_manual(values = c("red", "black", "green"), limits = c("DOWN", "not sig", "UP"))+
+  theme_bw() +
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "AMPH/SAL IP", x = "Base Mean", y="log2(FC)", color="")
+
+
+p8<-as.data.frame(amphUFvsalUF) %>%
+  mutate(SYMBOL = as.character(exp_mat$SYMBOL), 
+         sig = exp_mat$amphUFvsalUF_sig) %>%
+  mutate(LABEL = ifelse(sig %in% "not sig", "",SYMBOL))%>%
+  ggplot(aes(y = log2FoldChange, x = log10(baseMean) ,color=sig ))+
+  geom_point(aes(size = sig), alpha = .3) +
+  scale_size_manual(values = c(3,.5,3), limits = c("DOWN", "not sig", "UP")) +
+  geom_text(aes(y = log2FoldChange, x = log10(baseMean), label=LABEL), vjust = 0, nudge_x = 0.1, size = gene_text_size)+
+  scale_color_manual(values = c("red", "black", "green"), limits = c("DOWN", "not sig", "UP"))+
+  theme_bw() +
+  theme(axis.text = element_text( size = axis_text_size),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position="none")+
+  labs(title = "AMPH/SAL UF", x = "Base Mean", y="log2(FC)", color="")
+
+
+p5
+p6
+p7
+p8
+```
+
+```{r}
+png( paste0(pathFig,"/AMPH_IPvUF_MA.png"),height = 10, width = 20, units = 'in', res = 300, bg = "transparent")
+p5
+dev.off()
+
+png( paste0(pathFig,"/SAL_IPvUF_MA.png"),height = 10, width = 20, units = 'in', res = 300, bg = "transparent")
+p6
+dev.off()
+
+png( paste0(pathFig,"/AMPH_IPvSAL_IP_MA.png"),height = 10, width = 20, units = 'in', res = 300, bg = "transparent")
+p7
+dev.off()
+
+png( paste0(pathFig,"/AMPH_UFvSAL_UF_MA.png"),height = 10, width = 20, units = 'in', res = 300, bg = "transparent")
+p8
+dev.off()
+```
+
+```{r}
+# This function will plot selected genes based o
+# it will also save the plot. The user should 
+# specify the genes of interest as well as the 
+# type (raw, rpkm, tpm, vst) of values to be used.
+library(ggsignif)
+
+plotGOF<-function(genesOfInterest, name, type="DESeq", save = FALSE){
+  # selecting daa
+  if(type %in% 'raw') {
+    temp_mat = counts_filt
+  }else if(type %in% 'rpkm'){
+    temp_mat = rpkm_filt
+  }else if(type %in% 'tpm'){
+    temp_mat = tpm_filt
+  }else{
+    temp_mat = mat
+    }
+  
+  # columns to be selected
+  f <- c("SYMBOL",  
+         paste0("PV_IP_AMPH_", 1:4), 
+         paste0("PV_UF_AMPH_", 1:4), 
+         paste0("PV_IP_SAL_", 1:4), 
+         paste0("PV_UF_SAL_", 1:4),
+         "amphIPvUF_sig",
+         "salIPvUF_sig",
+         "amphIPvsalIP_sig",
+         "amphUFvsalUF_sig" )
+  
+
+  data<- as.data.frame(temp_mat) %>%
+     mutate(SYMBOL = as.character(exp_mat$SYMBOL),
+            amphIPvUF_sig = exp_mat$amphIPvUF_sig,
+            salIPvUF_sig = exp_mat$salIPvUF_sig,
+            amphIPvsalIP_sig = exp_mat$amphIPvsalIP_sig,
+            amphUFvsalUF_sig = exp_mat$amphUFvsalUF_sig)%>%
+    filter(SYMBOL %in% genesOfInterest) %>%
+    gather(. ,EXP, VALUE, -SYMBOL, -amphIPvUF_sig, -salIPvUF_sig,-amphIPvsalIP_sig, -amphUFvsalUF_sig) %>%
+    mutate(IPvUF = ifelse(grepl("IP", EXP), "IP", "UF"),
+         Treatment = ifelse(grepl( "AMPH", EXP) , "AMPH", "SAL"),
+         SYMBOL_f = factor(SYMBOL, levels = genesOfInterest)) %>%
+    mutate(Treatment_f = paste0(Treatment, ' ', IPvUF)) %>% 
+    group_by(SYMBOL_f, Treatment_f) %>%  
+    summarize(mean_exp = mean(VALUE),   
+            exp_se = sd(VALUE)/sqrt(n()),
+            n_samples = n()) %>%
+  ungroup() 
+  
+  plots <- list()
+  for( i in 1:length(genesOfInterest)){
+    
+    # selecting the comparsions that are signiciant
+    comparisons = list(c('AMPH IP', 'AMPH UF'), c('SAL IP', 'SAL UF'), c('AMPH IP', 'SAL IP'), c('AMPH UF', 'SAL UF'))
+    
+    comp <-exp_mat %>%
+    filter(SYMBOL %in% genesOfInterest[i]) %>%
+    dplyr::select(c("amphIPvUF_sig","salIPvUF_sig", "amphIPvsalIP_sig", "amphUFvsalUF_sig"))
+    
+    comparisons = comparisons[!(comp %in% 'not sig')]
+    
+     p <- data %>%
+      filter(SYMBOL_f %in% genesOfInterest[i]) %>% 
+      ggplot(aes(x=Treatment_f, fill = Treatment_f, y=mean_exp))+
+      geom_errorbar(aes(ymin = mean_exp - exp_se, ymax = mean_exp + exp_se), width = 0.5, position = position_dodge(.9)) +
+      geom_bar( stat="identity", position="dodge", alpha=.8) +
+       geom_jitter()+
+      scale_fill_manual(values = c("indianred1", "steelblue1", "red", "blue"), 
+                        limits = c("SAL IP", "SAL UF", "AMPH IP", "AMPH UF")  )+
+      labs(x="", y="", fill= "") + 
+      facet_wrap(~SYMBOL_f)+
+      geom_signif(comparisons = comparisons,  annotation=c("*"))+
+      theme_bw() +
+      theme(strip.text.x = element_text(size = 18), axis.text = element_text( size = axis_text_size, hjust =1),
+        axis.title = element_text(size = title_size, face = "bold"),
+        title = element_text(size = title_size, face = "bold"),
+        legend.position='none')
+     
+     #plots[i] <-p
+      print(p)
+      
+        if(save){
+          png(paste0(pathFig,"/",genesOfInterest[i],"_",type,".png"),
+              height = 10, width = 20, units = 'in', res = 300, bg = "transparent")
+          print(p)
+          dev.off()
+        }
+  }
+  
+
+}
+
+
+
+```
+
+```{r}
+exp_mat %>% 
+  filter(SYMBOL %in% c("Npas4", "Bdnf")) %>% 
+  ggplot(aes())
+```
+
+```{r}
+genesOfInterest = c("Sst", "Npas4", "Arc", "Bdnf")
+plotGOF(genesOfInterest, name = "enriched", save=TRUE)
+plotGOF(genesOfInterest, name = "enriched",type = "tpm", save=TRUE)
+```
+
+```{r}
+genesOfInterest = c("Fos","Fosb", "Fosl2", "Jun", "Junb")
+plotGOF(genesOfInterest, name = "Fos", save=TRUE)
+plotGOF(genesOfInterest, name = "Fos", type = "tpm", save=TRUE)
+```
+
+```{r}
+genesOfInterest = c("Gfap", "Aldh1l1", "Megf10", "Olig1")
+plotGOF(genesOfInterest, name = "Glia", save=TRUE)
+plotGOF(genesOfInterest, name = "Glia", type = "tpm", save=TRUE)
+```
+
+```{r}
+genesOfInterest = c("Neurod6", "Camk2a", "Sst", "Igf1", "Vgf")
+plotGOF(genesOfInterest, name = "OtherMarkers", save=TRUE)
+plotGOF(genesOfInterest, name = "OtherMarkers", type = "tpm", save=TRUE)
+```
+
+```{r}
+genesOfInterest = c("Igf1", "Acan", "Cntnap4", "Bcan", "Fos", "Fosb")
+plotGOF(genesOfInterest,  name = "ActivityDependent", type = "tpm", save=TRUE)
+plotGOF(genesOfInterest,  name = "ActivityDependent", save=TRUE)
+```
+
+```{r}
+down = as.character(exp_mat$SYMBOL[exp_mat$amphIPvsalIP_sig %in% "DOWN"])
+plotGOF(down,  name = "down", type = "tpm", save=TRUE)
+plotGOF(down,  name = "down", save=TRUE)
+```
+
+```{r}
+up = as.character(exp_mat$SYMBOL[exp_mat$amphIPvsalIP_sig %in% "UP"])
+plotGOF(up,  name = "up", type = "tpm", save=TRUE)
+plotGOF(up,  name = "up", save=TRUE)
+```
+
+
+Looking at individual genes 
+```{r}
+geneOfInterest = "Sst"
+plotCounts(dds, gene =which(genes_filt %in% geneOfInterest), intgroup = "samples" , col = Samples_QC$Replicate, main =geneOfInterest)
+```
+
+
+```{r}
+#Vizualizng Differential Peaks
+### Heatmaps!
+
+library(pheatmap)
+
+title="test"
+
+createHeatmap <-function(mat, DETable, title, Genelist){
+ 
+}
+
+```
+
+```{r, fig.height=12, fig.width=4}
+################# MODIFY TO CHANGE COMPARISON ##############
+DETable=salIPvUF
+samplesOfInterest = colnames(mat)
+title = "Saline IP/UF"
+topn = 100
+lfc_c = 0
+pvalue_c = .1
+
+#get desired matrix
+pmheat = mat[,samplesOfInterest] # use mat for normalized values or use counts_filt for z scores
+pmheatZ = counts_filt[, samplesOfInterest]
+tpmaverageheat=cbind(rowMeans(pmheat[,1:4]),rowMeans(pmheat[,5:8])) # remember to change this as the numbers of samples change
+
+# get the DE genes
+d = as.data.frame(DETable@listData)
+is.up <-(DETable$padj< pvalue_c & DETable$log2FoldChange>lfc_c)
+is.down <-(DETable$padj< pvalue_c & DETable$log2FoldChange<lfc_c)
+
+#combine with meta data and annotate rows by gene names
+pmheat_plot<-data.frame(d,scale(pmheat)) %>%   # use pmheat to see all values, use tmpaverageheat to see average by sample ##########################
+  mutate(GeneID = genes_filt,          # adding gene name
+         sig=ifelse(is.up,"up", ifelse(is.down, "down", "notsig"))) %>%  # add significanxe
+  filter(sig %in% c('up') ) %>% # filter for significant genes
+  arrange(padj) %>% 
+  arrange(desc(log2FoldChange)) # sort by p value
+
+rownames(pmheat_plot)=pmheat_plot$GeneID
+
+# select the top n rows if possible
+if(nrow(pmheat_plot) < topn){
+  n = nrow(pmheat_plot)
+}else{
+  n = topn}
+ 
+# plot heatmap
+title = paste0(title, "\n Top ", n, " DE Genes")
+breaksList = seq(-2, 2, by = .1)
+
+pheatmap(pmheat_plot[1:n, samplesOfInterest],
+         #scale = 'column',
+         #breaks = breaksList,
+           show_rownames = T,
+           show_colnames = T,
+           cluster_cols = F,
+         cluster_rows =T,
+           treeheight_row = 0,
+           color = colorRampPalette(rev(brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList)),
+           annotation_names_col = F,
+           main = title )
+
+```
+
