@@ -50,10 +50,14 @@ customRRHO = function(diff_signal1, diff_signal2, dir, labels, conditions, lims=
   # extracting and rotating matrix
   mat = object$hypermat
   mat = t(mat)
-  #mat = mat[nrow(mat):1,]
   
-  # finding quadrants
-  mat.signs = object$hypermat.signs
+  # setting p values that are Inf to hightest p value (countable)
+  if(max(mat) == Inf){
+    cat("\nWARNING: some p-values are Inf, so they are being replaced with the max on the color bar\n")
+    mat[which(mat %in% Inf)] = max( mat[mat!=max(mat)] )
+    
+  }
+
   
   
   mycol <- c("navy", "blue", "cyan", "green", "yellow", "red", "red4")
